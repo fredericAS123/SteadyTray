@@ -14,7 +14,7 @@ This is the official code release for **SteadyTray**. The repository contains th
 
 ## Overview
 
-This project provides reinforcement learning environments for training steady-tray tasks on Unitree robots, built on top of a custom fork of [IsaacLab](https://github.com/AllenHuangGit/IsaacLab). The training pipeline uses PPO via RSL-RL and supports multi-GPU distributed training. Trained policies can be deployed in MuJoCo for sim2sim validation.
+This project provides reinforcement learning environments for training steady-tray tasks on Unitree robots, built on top of a custom fork of [IsaacLab](https://github.com/AllenHuangGit/IsaacLab_SteadyTray.git). The training pipeline uses PPO via RSL-RL and supports multi-GPU distributed training. Trained policies can be deployed in MuJoCo for sim2sim validation.
 
 ## Installation
 
@@ -24,23 +24,23 @@ This project depends on a custom fork of IsaacLab. The recommended setup is via 
 
 ```bash
 # Clone our IsaacLab fork
-git clone https://github.com/AllenHuangGit/IsaacLab.git
+git clone https://github.com/AllenHuangGit/IsaacLab_SteadyTray.git
 
 # Clone SteadyTray
-git clone https://github.com/AllenHuangGit/steadytray.git
+git clone https://github.com/AllenHuangGit/SteadyTray.git
 ```
 
 ### 2. Build and Launch the Isaac Lab Docker Container
 
 Follow the [Isaac Lab Docker guide](https://isaac-sim.github.io/IsaacLab/main/source/deployment/docker.html) to build the Docker image from our IsaacLab fork, then launch the container with the SteadyTray repository mounted.
 
-**Option A:** Uncomment the mount lines in [`docker/docker-compose.yaml` (L68–L71)](https://github.com/AllenHuangGit/IsaacLab/blob/main/docker/docker-compose.yaml#L68-L71) and update the source path to your local SteadyTray directory:
+**Option A:** Uncomment the mount lines in [`docker/docker-compose.yaml` (L68–L71)](https://github.com/AllenHuangGit/IsaacLab_SteadyTray/blob/main/docker/docker-compose.yaml#L68-L71) and update the source path to your local SteadyTray directory:
 
 ```yaml
     # * The following is used to mount our extension codebase
   - type: bind
-    source: /path/to/steadytray     #* Change this to the path of your local extension codebase
-    target: /workspace/steadytray
+    source: /path/to/SteadyTray     #* Change this to the path of your local extension codebase
+    target: /workspace/SteadyTray
 ```
 
 Then use the standard IsaacLab Docker commands:
@@ -58,7 +58,7 @@ cd IsaacLab/docker
 docker compose --env-file .env.base --profile base build isaac-lab-base
 # Launch the container with SteadyTray mounted
 docker compose --env-file .env.base --profile base run --rm \
-    -v /path/to/steadytray:/workspace/steadytray \
+    -v /path/to/SteadyTray:/workspace/SteadyTray \
     isaac-lab-base bash
 ```
 
@@ -67,7 +67,7 @@ docker compose --env-file .env.base --profile base run --rm \
 Inside the container, install the package in editable mode:
 
 ```bash
-cd /workspace/steadytray
+cd /workspace/SteadyTray
 python -m pip install -e source/steadytray
 
 # Install git-lfs and tmux
@@ -81,11 +81,11 @@ The training pipeline consists of four sequential stages (see Appendix B of the 
 
 | Stage | Task | Description | Requires Pretrained Model |
 |---|---|---|---|
-| 1 | `G1-Steady-Tray-Pre-Locomotion` | Base locomotion with upper body frozen for faster training | No |
-| 1* | `G1-Steady-Tray-Locomotion` | *(Optional)* Full-body locomotion training | No |
-| 2 | `G1-Steady-Tray` | Fine-tune locomotion with tray-holding rewards | Yes (Stage 1) |
-| 3 | `G1-Steady-Object` | Residual teacher for object stabilization on the tray | Yes (Stage 2) |
-| 4 | `G1-Steady-Object-Distillation` | Distill privileged teacher into a deployable student policy | Yes (Stage 3) |
+| 1 | `G1-Steady-Tray-Pre-Locomotion` | Base locomotion with upper body frozen for faster training | No (Stage 1) |
+| 1* | `G1-Steady-Tray-Locomotion` | *(Optional)* Full-body locomotion training | Optional (Stage 1*) |
+| 2 | `G1-Steady-Tray` | Fine-tune locomotion with tray-holding rewards | Yes (Stage 2) |
+| 3 | `G1-Steady-Object` | Residual teacher for object stabilization on the tray | Yes (Stage 3) |
+| 4 | `G1-Steady-Object-Distillation` | Distill privileged teacher into a deployable student policy | Yes (Stage 4) |
 
 ### Stage 1: Pre-train Locomotion
 

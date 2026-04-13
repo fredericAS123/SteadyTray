@@ -7,12 +7,12 @@ version = "0.1.0"
 category = "isaaclab"
 readme  = "README.md"
 
-title = "Unitree RL Lab"
-author = "Unitree Robotics"
-maintainer = "Unitree Robotics"
-description="reinforcement learning environments for Unitree robots"
-repository = "https://github.com/AllenHuangGit/steadytray"
-keywords = ["extension", "template", "isaaclab"]
+title = "SteadyTray"
+author = "Anlun Huang"
+maintainer = "Anlun Huang"
+description="Learning object balancing tasks in humanoid tray transport via residual reinforcement learning"
+repository = "https://github.com/AllenHuangGit/SteadyTray"
+keywords = ["isaaclab", "reinforcement-learning", "humanoid"]
 
 [dependencies]
 "isaaclab" = {}
