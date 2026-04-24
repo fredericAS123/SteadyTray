@@ -16,6 +16,7 @@ from copy import deepcopy
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
+from scripts.rsl_rl.adapter.actor_critic import AdaptedActorCritic, ResidualActorCritic
 from scripts.rsl_rl.adapter.student_teacher import AdaptedStudentTeacher
 
 # ---------- Helper Functions ----------
@@ -90,6 +91,19 @@ def _is_distillation_checkpoint(state_dict):
     has_teacher = any('teacher_encoder.' in k for k in state_dict)
     return has_student and has_teacher
 
+
+def _is_adapter_checkpoint(state_dict):
+    """Check if checkpoint is a Stage 3 adapter teacher checkpoint."""
+    has_history_encoder = any('history_encoder.' in k for k in state_dict)
+    has_film = any(k.startswith('actor_body.') for k in state_dict) and any(
+        k.startswith('action_head.') for k in state_dict
+    )
+    has_residual = any(k.startswith('frozen_actor.') for k in state_dict) and any(
+        k.startswith('residual_adapter.') for k in state_dict
+    )
+    return has_history_encoder and (has_film or has_residual)
+
+
 def _is_standard_checkpoint(state_dict):
     """Check if checkpoint is standard RSL-RL (no encoder, no adapters)."""
     has_encoder = any("encoder." in k for k in state_dict.keys())
@@ -115,6 +129,113 @@ def _detect_distillation_adapter_type(state_dict):
             "Expected 'actor_body.*' + 'action_head.*' (FiLM) "
             "or 'frozen_actor.*' + 'residual_adapter.*' (Residual)."
         )
+
+
+def _detect_adapter_type(state_dict):
+    """Detect whether a Stage 3 adapter checkpoint uses FiLM or Residual architecture."""
+    has_actor_body = any(k.startswith('actor_body.') for k in state_dict)
+    has_action_head = any(k.startswith('action_head.') for k in state_dict)
+    has_frozen_actor = any(k.startswith('frozen_actor.') for k in state_dict)
+    has_residual_adapter = any(k.startswith('residual_adapter.') for k in state_dict)
+
+    if has_actor_body and has_action_head:
+        return "film"
+    if has_frozen_actor and has_residual_adapter:
+        return "residual"
+    raise ValueError("Cannot detect Stage 3 adapter type from checkpoint keys.")
+
+
+def _auto_detect_encoder_params(state_dict, prefix):
+    """Auto-detect shared history encoder dimensions and architecture."""
+    params = {
+        'num_encoder_obs': state_dict[f"{prefix}.embed.weight"].shape[1],
+        'ctx_dim': state_dict[f"{prefix}.embed.weight"].shape[0],
+    }
+
+    has_gru = any(f'{prefix}.gru.' in k for k in state_dict)
+    has_causal = any(f'{prefix}.causal_mask' in k for k in state_dict)
+    has_transformer_module = any(f'{prefix}.transformer.' in k for k in state_dict)
+    has_direct_layers = any(k.startswith(f'{prefix}.layers.') for k in state_dict)
+
+    if has_causal or (has_direct_layers and not has_transformer_module and not has_gru):
+        params['encoder_type'] = 'causal_transformer'
+    elif has_transformer_module:
+        params['encoder_type'] = 'transformer'
+    elif has_gru:
+        params['encoder_type'] = 'gru'
+    else:
+        params['encoder_type'] = 'gru'
+        print(f"[WARN] Could not detect {prefix} type, defaulting to 'gru'")
+
+    if params['encoder_type'] == 'gru':
+        gru_layer_keys = [k for k in state_dict if f'{prefix}.gru.weight_ih_l' in k]
+        params['encoder_layers'] = len(gru_layer_keys) if gru_layer_keys else 1
+    else:
+        layer_keys = [k for k in state_dict if f'{prefix}.transformer.layers.' in k or f'{prefix}.layers.' in k]
+        indices = set()
+        for key in layer_keys:
+            parts = key.split('.')
+            for i, part in enumerate(parts):
+                if part == 'layers' and i + 1 < len(parts) and parts[i + 1].isdigit():
+                    indices.add(int(parts[i + 1]))
+        params['encoder_layers'] = max(indices) + 1 if indices else 1
+
+    return params
+
+
+def _auto_detect_adapter_params(state_dict, adapter_type):
+    """Auto-detect architecture parameters from a Stage 3 adapter checkpoint."""
+    params = _auto_detect_encoder_params(state_dict, 'history_encoder')
+
+    if adapter_type == "film":
+        params['num_actor_obs'] = state_dict["actor_body.0.base.weight"].shape[1]
+        actor_hidden_dims = []
+        i = 0
+        while f"actor_body.{i}.base.weight" in state_dict:
+            actor_hidden_dims.append(state_dict[f"actor_body.{i}.base.weight"].shape[0])
+            i += 2
+        params['actor_hidden_dims'] = actor_hidden_dims
+        params['num_actions'] = state_dict["action_head.weight"].shape[0]
+        if "actor_body.0.mod.0.weight" in state_dict:
+            params['adapter_hidden'] = state_dict["actor_body.0.mod.0.weight"].shape[0]
+        params['use_gate'] = "actor_body.0.alpha" in state_dict
+
+    elif adapter_type == "residual":
+        params['num_actor_obs'] = state_dict["frozen_actor.0.weight"].shape[1]
+        linear_indices = sorted(
+            int(k.split('.')[1]) for k in state_dict
+            if k.startswith('frozen_actor.') and k.endswith('.weight')
+        )
+        params['actor_hidden_dims'] = [
+            state_dict[f"frozen_actor.{idx}.weight"].shape[0] for idx in linear_indices[:-1]
+        ]
+        params['num_actions'] = state_dict[f"frozen_actor.{linear_indices[-1]}.weight"].shape[0]
+        res_linear_indices = sorted(
+            int(k.split('.')[2]) for k in state_dict
+            if k.startswith('residual_adapter.residual_mlp.') and k.endswith('.weight')
+            and state_dict[k].dim() == 2
+        )
+        params['residual_hidden_dims'] = [
+            state_dict[f"residual_adapter.residual_mlp.{idx}.weight"].shape[0]
+            for idx in res_linear_indices[:-1]
+        ]
+        params['use_gate'] = "residual_adapter.alpha" in state_dict
+
+    critic_indices = sorted(
+        int(k.split('.')[1]) for k in state_dict
+        if k.startswith('critic.') and k.endswith('.weight')
+    )
+    params['critic_hidden_dims'] = [state_dict[f"critic.{idx}.weight"].shape[0] for idx in critic_indices[:-1]]
+    params['num_critic_obs'] = state_dict["critic.0.weight"].shape[1] - params['ctx_dim']
+
+    if 'std' in state_dict:
+        params['noise_std_type'] = 'scalar'
+    elif 'log_std' in state_dict:
+        params['noise_std_type'] = 'log'
+    else:
+        params['noise_std_type'] = 'scalar'
+
+    return params
 
 
 def _auto_detect_distillation_params(state_dict, adapter_type):
@@ -270,6 +391,62 @@ def load_ckpt_smart(path: str | Path, device: str | torch.device):
 
 
 # ---------- Export Implementation ----------
+def export_adapter_policy_as_jit(
+    policy,
+    normalizer,
+    path,
+    filename="policy.pt",
+    encoder_obs_dim: int = None,
+    policy_obs_dim: int = None,
+    encoder_seq_len: int = 32,
+    adapter_type: str = "film",
+    device="cpu",
+):
+    """Export Stage 3 adapter teacher policies for MuJoCo sim2sim."""
+    assert encoder_obs_dim is not None, "encoder_obs_dim required"
+    assert policy_obs_dim is not None, "policy_obs_dim required"
+
+    if adapter_type == "film":
+        class ExportAdapterPolicy(torch.nn.Module):
+            def __init__(self, policy, normalizer):
+                super().__init__()
+                self.history_encoder = policy.history_encoder
+                self.actor_body = policy.actor_body
+                self.action_head = policy.action_head
+                self.normalizer = normalizer
+
+            def forward(self, encoder_obs, policy_obs):
+                policy_obs = _apply_normalizer(self.normalizer, policy_obs)
+                e_t = self.history_encoder(encoder_obs)
+                h = self.actor_body(policy_obs, e_t)
+                return self.action_head(h)
+
+    elif adapter_type == "residual":
+        class ExportAdapterPolicy(torch.nn.Module):
+            def __init__(self, policy, normalizer):
+                super().__init__()
+                self.history_encoder = policy.history_encoder
+                self.frozen_actor = policy.frozen_actor
+                self.residual_adapter = policy.residual_adapter
+                self.normalizer = normalizer
+
+            def forward(self, encoder_obs, policy_obs):
+                policy_obs = _apply_normalizer(self.normalizer, policy_obs)
+                e_t = self.history_encoder(encoder_obs)
+                base_actions = self.frozen_actor(policy_obs)
+                return self.residual_adapter(base_actions, e_t, proprio=policy_obs)
+    else:
+        raise ValueError(f"Unknown adapter_type: {adapter_type}. Must be 'film' or 'residual'")
+
+    export_policy = ExportAdapterPolicy(policy, normalizer).eval()
+    example_encoder_obs = torch.randn(encoder_seq_len, 1, encoder_obs_dim, dtype=torch.float32, device=device)
+    example_policy_obs = torch.randn(1, policy_obs_dim, dtype=torch.float32, device=device)
+    os.makedirs(path, exist_ok=True)
+    with torch.no_grad():
+        traced = torch.jit.trace(export_policy, (example_encoder_obs, example_policy_obs))
+    traced.save(os.path.join(path, filename))
+
+
 def export_policy_as_jit(policy, normalizer, path, filename="policy.pt", obs_dim: int = None, device="cpu"):
     assert obs_dim is not None, "export_policy_as_jit requires obs_dim"
 
@@ -534,6 +711,7 @@ def main():
             
             # Detect checkpoint type
             is_distillation = _is_distillation_checkpoint(model_state_dict)
+            is_adapter = _is_adapter_checkpoint(model_state_dict)
             is_standard = _is_standard_checkpoint(model_state_dict)
             
             if is_distillation:
@@ -595,6 +773,65 @@ def main():
                     device=args.device
                 )
                 print(f"[OK] JIT (distillation/{adapter_type}): {export_dir/jit_filename}")
+
+            elif is_adapter:
+                print("[INFO] Detected: Stage 3 Adapter Teacher Policy")
+
+                adapter_type = _detect_adapter_type(model_state_dict)
+                arch_params = _auto_detect_adapter_params(model_state_dict, adapter_type)
+
+                print(f"  - Adapter type: {adapter_type.upper()}")
+                print(f"  - Encoder type: {arch_params['encoder_type'].upper()}")
+                print(f"  - Encoder input dim: {arch_params['num_encoder_obs']}")
+                print(f"  - Actor input dim: {arch_params['num_actor_obs']}")
+                print(f"  - Actor hidden dims: {arch_params['actor_hidden_dims']}")
+                print(f"  - Num actions: {arch_params['num_actions']}")
+                print(f"  - Context dim: {arch_params['ctx_dim']}")
+
+                common_kwargs = dict(
+                    num_actor_obs=arch_params['num_actor_obs'],
+                    num_critic_obs=arch_params['num_critic_obs'],
+                    num_actions=arch_params['num_actions'],
+                    actor_hidden_dims=arch_params['actor_hidden_dims'],
+                    critic_hidden_dims=arch_params['critic_hidden_dims'],
+                    activation='elu',
+                    ctx_dim=arch_params['ctx_dim'],
+                    encoder_layers=arch_params['encoder_layers'],
+                    use_gate=arch_params['use_gate'],
+                    encoder_type=arch_params['encoder_type'],
+                    num_heads=args.num_heads,
+                    encoder_dropout=0.0,
+                    num_encoder_obs=arch_params['num_encoder_obs'],
+                    noise_std_type=arch_params.get('noise_std_type', 'scalar'),
+                )
+                if adapter_type == "film":
+                    policy = AdaptedActorCritic(
+                        adapter_hidden=arch_params.get('adapter_hidden', 128),
+                        clamp_gamma=3.0,
+                        **common_kwargs,
+                    ).to(args.device)
+                else:
+                    policy = ResidualActorCritic(
+                        residual_hidden_dims=arch_params.get('residual_hidden_dims', [128, 64]),
+                        clamp_residual=None,
+                        **common_kwargs,
+                    ).to(args.device)
+
+                policy.load_state_dict(model_state_dict, strict=False)
+                policy.eval()
+
+                export_adapter_policy_as_jit(
+                    policy,
+                    normalizer=None,
+                    path=str(export_dir),
+                    filename=jit_filename,
+                    encoder_obs_dim=arch_params['num_encoder_obs'],
+                    policy_obs_dim=arch_params['num_actor_obs'],
+                    encoder_seq_len=args.encoder_seq_len,
+                    adapter_type=adapter_type,
+                    device=args.device,
+                )
+                print(f"[OK] JIT (stage3-adapter/{adapter_type}): {export_dir/jit_filename}")
                 
             elif is_standard:
                 print("[INFO] Detected: Standard RSL-RL Policy")
