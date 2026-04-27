@@ -1,0 +1,12 @@
+base_config: g1_29dof_walk.yaml
+
+xml_path: "deploy/deploy_mujoco/g1_xml/g1_tray_holder.xml"
+simulation_duration: 60.0
+cmd_init: [0.5, 0.0, 0.0]
+remove_bodies: []
+
+# Stage 3 teacher/adapter encoder observation:
+# proprio(96) + base_lin_vel(3) + tray_gravity(3) + tray_pos_rel(3)
+# + object_pos_rel(3) + object_ang_vel_rel(3) + object_lin_vel_rel(3)
+# + object_projected_gravity(3)
+stage3_teacher_encoder_obs_dim: 117
